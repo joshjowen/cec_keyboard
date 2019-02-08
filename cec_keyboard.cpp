@@ -24,7 +24,7 @@ void read_config_yaml(std::string config_file);
 
 void cecKeyPress(void*, const CEC::cec_keypress* msg);
 
-void print_usage(void);
+void print_usage(std::string prog_name);
 
 void sigintHandler(int signal);
 
@@ -36,6 +36,9 @@ bool getInputKeyCode(std::string input_key_str, int* input_key);
 bool translateCECToKeyCode(CEC::cec_user_control_code cec_control_code,
                            int* input_key);
 
+std::string getCECControlStr(CEC::cec_user_control_code cec_control_code);
+
+void dump_keymap(void);
 
 int main(int argc, char* argv[])
 {
@@ -47,7 +50,8 @@ int main(int argc, char* argv[])
 
   std::string cec_device_name, ui_device_name;
   int opt_return;
-  while ((opt_return = getopt(argc, argv, "c:d:u:h?")) != -1)
+  bool dump_and_exit = false;
+  while ((opt_return = getopt(argc, argv, "c:d:u:mh?")) != -1)
   {
     switch (opt_return)
     {
@@ -62,13 +66,21 @@ int main(int argc, char* argv[])
       case 'u':
         ui_device_name = optarg;
         break;
-
+      case 'm':
+        dump_and_exit = true;
+        break;
       case 'h':
       case '?':
       default:
-        print_usage();
+        print_usage(argv[0]);
         return -1;
     }
+  }
+
+  if (dump_and_exit)
+  {
+    dump_keymap();
+    return 0;
   }
 
   if (ui_device_name.empty())
@@ -230,18 +242,19 @@ void cecKeyPress(void*, const CEC::cec_keypress* msg)
   else
   {
     std::cout << "Unmapped key pressed! CEC code: "
-              << static_cast<int>(msg->keycode) << std::endl;
+              << getCECControlStr(msg->keycode) << std::endl;
   }
 }
 
 
-void print_usage(void)
+void print_usage(std::string prog_name)
 {
-    std::cout << std:: endl << "usage: serial_split [options]"
+    std::cout << std:: endl << "usage: " << prog_name << " [options]"
       << std:: endl << std:: endl << "options:"
-      << std:: endl << "\t-c\t- configuration yaml location"
-      << std:: endl << "\t-d\t- cec device port (default: autodetect)"
-      << std:: endl << "\t-u\t- uinput device port (default: /dev/uinput)"
+      << std:: endl << "\t-c {file}\t- configuration yaml location"
+      << std:: endl << "\t-d {device}\t- cec device port (default: autodetect)"
+      << std:: endl << "\t-u {device}\t- uinput device port (default: /dev/uinput)"
+      << std:: endl << "\t-m\t\t- dump config yaml and exit"
       << std:: endl << std:: endl;
 }
 
@@ -298,4 +311,55 @@ bool translateCECToKeyCode(CEC::cec_user_control_code cec_control_code,
 
   *input_key = it->second;
   return true;
+}
+
+
+std::string getCECControlStr(CEC::cec_user_control_code cec_control_code)
+{
+  for (std::map<std::string, CEC::cec_user_control_code>::iterator it =
+       cec_code_map.begin(); it != cec_code_map.end(); it++)
+  {
+    if (it->second == cec_control_code)
+    {
+      return it->first;
+    }
+  }
+
+  return std::string("");
+}
+
+
+std::string getKeyStr(int input_key)
+{
+  for (std::map<std::string, int>::iterator it =
+       input_key_map.begin(); it != input_key_map.end(); it++)
+  {
+    if (it->second == input_key)
+    {
+      return it->first;
+    }
+  }
+
+  return std::string("");
+}
+
+
+void dump_keymap(void)
+{
+  YAML::Emitter out;
+  out << YAML::BeginMap;
+  out << YAML::Key << "keymap";
+  out << YAML::BeginMap;
+
+  for (std::map<CEC::cec_user_control_code, int>::iterator it =
+       cec_to_key.begin(); it != cec_to_key.end(); it++)
+  {
+    out << YAML::Key << getCECControlStr(it->first);
+    out << YAML::Value << getKeyStr(it->second);
+  }
+
+  out << YAML::EndMap;
+  out << YAML::EndMap;
+  std::cout << out.c_str() << std::endl;
+  return;
 }
