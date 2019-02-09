@@ -6,12 +6,38 @@ add_definitions(-ldl)
 
 find_package(yaml-cpp REQUIRED)
 
-include_directories(${YAML_CPP_INCLUDE_DIRS})
-link_directories(${YAML_CPP_LIBRARY_DIRS})
-add_definitions(${YAML_CPP_DEFINITIONS})
+find_package(Boost REQUIRED system)
+find_package(websocketpp REQUIRED)
 
-add_executable (${PROJECT_NAME} inputdevice/inputdevice.cpp ${PROJECT_NAME}.cpp)
-target_link_libraries(${PROJECT_NAME} ${YAML_CPP_LIBRARIES} ${CMAKE_DL_LIBS})
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JSONCPP jsoncpp)
+
+## Print the variables set by the packages above
+#get_cmake_property(_variableNames VARIABLES)
+#list (SORT _variableNames)
+#foreach (_variableName ${_variableNames})
+#    message(STATUS "${_variableName}=${${_variableName}}")
+#endforeach()
+
+include_directories(
+                    ${YAML_CPP_INCLUDE_DIR}
+                    ${WEBSOCKETPP_INCLUDE_DIR}
+                    ${Boost_INCLUDE_DIR}
+                    ${JSONCPP_INCLUDE_DIRS})
+link_directories(
+                 ${Boost_LIBRARY_DIRS}
+                 ${JSONCPP_LIBRARIES})
+
+add_executable (${PROJECT_NAME}
+                inputdevice/inputdevice.cpp
+                ${PROJECT_NAME}.cpp)
+
+target_link_libraries(${PROJECT_NAME}
+                      ${YAML_CPP_LIBRARIES}
+                      ${CMAKE_DL_LIBS}
+                      ${Boost_LIBRARIES}
+                      ${JSONCPP_LIBRARIES}
+                      pthread)
 
 install(TARGETS ${PROJECT_NAME}
-        RUNTIME DESTINATION bin)
+        RUNTIME DESTINATION /usr/bin)

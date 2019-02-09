@@ -1,6 +1,7 @@
 #include <iostream>
 #include <signal.h>
 #include <getopt.h>
+#include <pthread.h>
 #include <mutex>
 #include <atomic>
 #include <queue>
@@ -8,26 +9,39 @@
 #include <libcec/cec.h>
 #include <libcec/cecloader.h>
 
-#include "yaml-cpp/yaml.h"
+#include <websocketpp/config/asio_no_tls.hpp>
+#include <websocketpp/server.hpp>
+#include <json/json.h>
+
+#include <yaml-cpp/yaml.h>
 
 #include "ceckeymap.h"
 #include "inputdevice/inputdevice.h"
 
-// build deps: libcec4-dev cmake libyaml-cpp-dev
-// deps: libcec4 libyaml-cpp0.5v5
+// build deps: libcec4-dev cmake libyaml-cpp-dev libwebsocketpp-dev libboost-system-dev libjsoncpp-dev
+// deps: libcec4 libyaml-cpp0.5v5 MAYBE boost-system libjsoncpp1
 
 uint32_t RepeatRateMs       = 250;
 uint32_t ReleaseDelayMs     = 0;
 uint32_t DoubleTapTimeoutMs = 650;
+int ws_port = -1;
 
 volatile std::atomic<bool> kill_main;
 std::mutex key_mutex;
 std::queue<int> key_queue;
 
+websocketpp::server<websocketpp::config::asio> ws_server;
+
+
+void* ws_loop(void*);
 
 void read_config_yaml(std::string config_file);
 
 void cecKeyPressCB(void*, const CEC::cec_keypress* msg);
+
+void wsMessageCB(websocketpp::server<websocketpp::config::asio>* s,
+                 websocketpp::connection_hdl hdl,
+                 websocketpp::server<websocketpp::config::asio>::message_ptr msg);
 
 void print_usage(std::string prog_name);
 
@@ -48,6 +62,8 @@ void dump_keymap(void);
 int main(int argc, char* argv[])
 {
   kill_main = false;
+  long int raw_port;
+
   if( signal(SIGINT, sigintHandler) == SIG_ERR)
   {
     std::cerr << "Could not install signal handler" << std::endl;
@@ -57,7 +73,7 @@ int main(int argc, char* argv[])
   std::string cec_device_name, ui_device_name;
   int opt_return;
   bool dump_and_exit = false;
-  while ((opt_return = getopt(argc, argv, "c:d:u:mh?")) != -1)
+  while ((opt_return = getopt(argc, argv, "c:d:u:p:mh?")) != -1)
   {
     switch (opt_return)
     {
@@ -74,6 +90,21 @@ int main(int argc, char* argv[])
         break;
       case 'm':
         dump_and_exit = true;
+        break;
+      case 'p':
+        char *remain;
+        errno = 0;
+        raw_port = strtol(optarg, &remain, 10);
+
+        if ((errno != 0) || (*remain != '\0') || (raw_port < 0)
+                                            || (raw_port > INT_MAX))
+        {
+          std::cout << "invalid websocket port provided:" << raw_port
+                                                          << std::endl;
+          return -1;
+
+        }
+        ws_port = raw_port;
         break;
       case 'h':
       case '?':
@@ -120,7 +151,6 @@ int main(int argc, char* argv[])
   cec_config.iDoubleTapTimeoutMs   = DoubleTapTimeoutMs;
   cec_callbacks.keyPress           = &cecKeyPressCB;
   cec_config.callbacks             = &cec_callbacks;
-
   cec_config.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_RECORDING_DEVICE);
 
   CEC::ICECAdapter* cec_adapter = LibCecInitialise(&cec_config);
@@ -162,6 +192,18 @@ int main(int argc, char* argv[])
 
   std::cout << "CEC device connected" << std::endl;
 
+
+  pthread_t ws_thread;
+
+  if (ws_port > 0)
+  {
+    if (pthread_create(&ws_thread, NULL, ws_loop, NULL))
+    {
+      std::cout << "Unable to start websocket thread" << std::endl;
+      kill_main = true;
+    }
+  }
+
   while (!kill_main)
   {
     {
@@ -178,10 +220,39 @@ int main(int argc, char* argv[])
     usleep(5000);
   }
 
+  ws_server.stop();
   cec_adapter->Close();
   delete id;
   UnloadLibCec(cec_adapter);
+  pthread_join(ws_thread, NULL);
   return 0;
+}
+
+
+void* ws_loop(void*)
+{
+  try
+  {
+    ws_server.set_access_channels(websocketpp::log::alevel::fail);
+    ws_server.clear_access_channels(websocketpp::log::alevel::fail);
+    ws_server.init_asio();
+    ws_server.set_message_handler(
+      websocketpp::lib::bind(&wsMessageCB, &ws_server,
+                             websocketpp::lib::placeholders::_1,
+                             websocketpp::lib::placeholders::_2));
+    ws_server.listen(ws_port);
+    ws_server.start_accept();
+
+    std::cout << "Websocket available on port " << ws_port << std::endl;
+    ws_server.run();
+  }
+  catch (websocketpp::exception const & e)
+  {
+    std::cout << e.what() << std::endl;
+    kill_main = true;
+  }
+
+  pthread_exit(NULL);
 }
 
 
@@ -264,6 +335,87 @@ void cecKeyPressCB(void*, const CEC::cec_keypress* msg)
 }
 
 
+void wsMessageCB(websocketpp::server<websocketpp::config::asio>* serv,
+                 websocketpp::connection_hdl hdl,
+                 websocketpp::server<websocketpp::config::asio>::message_ptr msg)
+{
+  hdl.lock().get();
+  std::string response;
+  Json::Value recievedJson;
+  Json::Reader reader;
+  Json::Value responseJson;
+
+  if (reader.parse(msg->get_payload().c_str(), recievedJson))
+  {
+    std::string target = recievedJson.get("target", "").asString();
+    std::string command = recievedJson.get("command", "").asString();
+    if (!(target.empty() || command.empty()))
+    {
+      if (target.compare("cec") == 0)
+      {
+        CEC::cec_user_control_code cCode;
+        if (getCECControlCode(command, &cCode))
+        {
+          responseJson["success"] = true;
+          responseJson["message"] = "cec code received";
+        }
+        else
+        {
+          responseJson["success"] = false;
+          responseJson["message"] = "Unrecognised cec command";
+        }
+      }
+      else if (target.compare("key") == 0)
+      {
+        int kCode;
+        if (getInputKeyCode(command, &kCode))
+        {
+          responseJson["success"] = true;
+          responseJson["message"] = "key code received";
+          std::lock_guard<std::mutex> lock(key_mutex);
+          key_queue.push(kCode);
+        }
+        else
+        {
+          responseJson["success"] = false;
+          responseJson["message"] = "Unrecognised key command";
+        }
+      }
+      else
+      {
+        responseJson["success"] = false;
+        responseJson["message"] = "Unrecognised command type";
+      }
+    }
+    else
+    {
+      responseJson["success"] = false;
+      responseJson["message"] = "target and command are both required parameters";
+    }
+  }
+  else
+  {
+    responseJson["success"] = false;
+    responseJson["message"] = reader.getFormattedErrorMessages();
+  }
+
+  Json::FastWriter fastWriter;
+  response = fastWriter.write(responseJson);
+
+  try
+  {
+      serv->send(hdl, response, msg->get_opcode());
+  }
+  catch (websocketpp::exception const & e)
+  {
+    std::cerr << "Failed to respond to websocket client." << std::endl
+              << e.what() << std::endl;
+  }
+
+  return;
+}
+
+
 void print_usage(std::string prog_name)
 {
     std::cout << std::endl << "usage: " << prog_name << " [options]"
@@ -271,6 +423,7 @@ void print_usage(std::string prog_name)
       << std::endl << "\t-c {file}\t- configuration yaml location"
       << std::endl << "\t-d {device}\t- cec device port (default: autodetect)"
       << std::endl << "\t-u {device}\t- uinput device port (default: /dev/uinput)"
+      << std::endl << "\t-p {port}\t- uinput device port (default: websocket disabled)"
       << std::endl << "\t-m\t\t- dump config yaml and exit"
       << std::endl << std::endl;
 }
