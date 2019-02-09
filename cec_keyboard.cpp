@@ -104,7 +104,6 @@ int main(int argc, char* argv[])
   catch(UserInputDevice::InputDeviceException& e)
   {
     std::cerr << "Can't open user input device: " << e.what() << std::endl;
-    delete id;
     return -1;
   }
 
