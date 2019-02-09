@@ -1,6 +1,9 @@
 #include <iostream>
 #include <signal.h>
 #include <getopt.h>
+#include <mutex>
+#include <atomic>
+#include <queue>
 
 #include <libcec/cec.h>
 #include <libcec/cecloader.h>
@@ -17,12 +20,14 @@ uint32_t RepeatRateMs       = 250;
 uint32_t ReleaseDelayMs     = 0;
 uint32_t DoubleTapTimeoutMs = 650;
 
-volatile bool kill_main = false;
-UserInputDevice::InputDevice* id;
+volatile std::atomic<bool> kill_main;
+std::mutex key_mutex;
+std::queue<int> key_queue;
+
 
 void read_config_yaml(std::string config_file);
 
-void cecKeyPress(void*, const CEC::cec_keypress* msg);
+void cecKeyPressCB(void*, const CEC::cec_keypress* msg);
 
 void print_usage(std::string prog_name);
 
@@ -42,6 +47,7 @@ void dump_keymap(void);
 
 int main(int argc, char* argv[])
 {
+  kill_main = false;
   if( signal(SIGINT, sigintHandler) == SIG_ERR)
   {
     std::cerr << "Could not install signal handler" << std::endl;
@@ -89,6 +95,8 @@ int main(int argc, char* argv[])
   }
 
   //create input device
+  UserInputDevice::InputDevice* id;
+
   try
   {
     id = new UserInputDevice::InputDevice(ui_device_name);
@@ -111,7 +119,7 @@ int main(int argc, char* argv[])
   cec_config.iButtonRepeatRateMs   = RepeatRateMs;
   cec_config.iButtonReleaseDelayMs = ReleaseDelayMs;
   cec_config.iDoubleTapTimeoutMs   = DoubleTapTimeoutMs;
-  cec_callbacks.keyPress           = &cecKeyPress;
+  cec_callbacks.keyPress           = &cecKeyPressCB;
   cec_config.callbacks             = &cec_callbacks;
 
   cec_config.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_RECORDING_DEVICE);
@@ -154,9 +162,21 @@ int main(int argc, char* argv[])
   }
 
   std::cout << "CEC device connected" << std::endl;
-  while(!kill_main)
+
+  while (!kill_main)
   {
-    sleep(1);
+    {
+      std::lock_guard<std::mutex> lock(key_mutex);
+
+      if (!key_queue.empty())
+      {
+        int input_key = key_queue.front();
+        key_queue.pop();
+        id->sendKeyInput(input_key);
+      }
+    }
+
+    usleep(5000);
   }
 
   cec_adapter->Close();
@@ -229,19 +249,17 @@ void read_config_yaml(std::string config_file)
 }
 
 
-void cecKeyPress(void*, const CEC::cec_keypress* msg)
+void cecKeyPressCB(void*, const CEC::cec_keypress* msg)
 {
   int input_key;
   if (translateCECToKeyCode(msg->keycode, &input_key))
   {
-    if(id)
-    {
-      id->sendKeyInput(input_key);
-    }
+    std::lock_guard<std::mutex> lock(key_mutex);
+    key_queue.push(input_key);
   }
   else
   {
-    std::cout << "Unmapped key pressed! CEC code: "
+    std::cout << "Unmapped CEC code received: "
               << getCECControlStr(msg->keycode) << std::endl;
   }
 }
@@ -249,13 +267,13 @@ void cecKeyPress(void*, const CEC::cec_keypress* msg)
 
 void print_usage(std::string prog_name)
 {
-    std::cout << std:: endl << "usage: " << prog_name << " [options]"
-      << std:: endl << std:: endl << "options:"
-      << std:: endl << "\t-c {file}\t- configuration yaml location"
-      << std:: endl << "\t-d {device}\t- cec device port (default: autodetect)"
-      << std:: endl << "\t-u {device}\t- uinput device port (default: /dev/uinput)"
-      << std:: endl << "\t-m\t\t- dump config yaml and exit"
-      << std:: endl << std:: endl;
+    std::cout << std::endl << "usage: " << prog_name << " [options]"
+      << std::endl << std::endl << "options:"
+      << std::endl << "\t-c {file}\t- configuration yaml location"
+      << std::endl << "\t-d {device}\t- cec device port (default: autodetect)"
+      << std::endl << "\t-u {device}\t- uinput device port (default: /dev/uinput)"
+      << std::endl << "\t-m\t\t- dump config yaml and exit"
+      << std::endl << std::endl;
 }
 
 
