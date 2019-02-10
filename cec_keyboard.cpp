@@ -19,7 +19,7 @@
 #include "inputdevice/inputdevice.h"
 
 // build deps: libcec4-dev cmake libyaml-cpp-dev libwebsocketpp-dev libboost-system-dev libjsoncpp-dev
-// deps: libcec4 libyaml-cpp0.5v5 MAYBE boost-system libjsoncpp1
+// deps: libcec4 libyaml-cpp0.5v5 libjsoncpp1
 
 uint32_t cecRepeatRateMs       = 250;
 uint32_t cecReleaseDelayMs     = 0;
