@@ -37,8 +37,6 @@ namespace UserInputDevice
     {
       close(device_fd_);
     }
-
-    std::cout << "User input device closed" << std::endl;
   }
 
 
