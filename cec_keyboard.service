@@ -1,0 +1,17 @@
+[Unit]
+Description=CEC Keyboard service
+After=syslog.target network.target
+
+[Service]
+ExecStart=/bin/cec_keyboard -p 9091 -n raspberrypi
+Type=simple
+User=root
+Group=root
+UMask=000
+Restart=always
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+[Install]
+WantedBy=multi-user.target
