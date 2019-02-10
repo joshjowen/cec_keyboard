@@ -3,7 +3,7 @@ Description=CEC Keyboard service
 After=syslog.target network.target
 
 [Service]
-ExecStart=/bin/cec_keyboard -p 9091 -n raspberrypi
+ExecStart=/usr/bin/cec_keyboard -p 9091 -n raspberrypi
 Type=simple
 User=root
 Group=root
