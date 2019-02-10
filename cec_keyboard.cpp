@@ -21,15 +21,17 @@
 // build deps: libcec4-dev cmake libyaml-cpp-dev libwebsocketpp-dev libboost-system-dev libjsoncpp-dev
 // deps: libcec4 libyaml-cpp0.5v5 MAYBE boost-system libjsoncpp1
 
-uint32_t RepeatRateMs       = 250;
-uint32_t ReleaseDelayMs     = 0;
-uint32_t DoubleTapTimeoutMs = 650;
+uint32_t cecRepeatRateMs       = 250;
+uint32_t cecReleaseDelayMs     = 0;
+uint32_t cecDoubleTapTimeoutMs = 650;
+std::string cecDeviceName      = "cec_keyboard";
 int ws_port = -1;
 
 volatile std::atomic<bool> kill_main;
 std::mutex key_mutex;
 std::queue<int> key_queue;
 
+CEC::ICECAdapter* cec_adapter;
 websocketpp::server<websocketpp::config::asio> ws_server;
 
 
@@ -38,6 +40,8 @@ void* ws_loop(void*);
 void read_config_yaml(std::string config_file);
 
 void cecKeyPressCB(void*, const CEC::cec_keypress* msg);
+
+bool execCECCommand(std::string cmd, std::string args, std::string response);
 
 void wsMessageCB(websocketpp::server<websocketpp::config::asio>* s,
                  websocketpp::connection_hdl hdl,
@@ -73,7 +77,7 @@ int main(int argc, char* argv[])
   std::string cec_device_name, ui_device_name;
   int opt_return;
   bool dump_and_exit = false;
-  while ((opt_return = getopt(argc, argv, "c:d:u:p:mh?")) != -1)
+  while ((opt_return = getopt(argc, argv, "c:d:u:p:n:mh?")) != -1)
   {
     switch (opt_return)
     {
@@ -105,6 +109,12 @@ int main(int argc, char* argv[])
 
         }
         ws_port = raw_port;
+        break;
+      case 'n':
+        if (strlen(optarg) <= 13)
+        {
+          cecDeviceName = optarg;
+        }
         break;
       case 'h':
       case '?':
@@ -143,17 +153,17 @@ int main(int argc, char* argv[])
   cec_config.Clear();
   cec_callbacks.Clear();
 
-  strcpy(cec_config.strDeviceName, "cecui_device");
+  strcpy(cec_config.strDeviceName, cecDeviceName.c_str());
   cec_config.clientVersion         = CEC::LIBCEC_VERSION_CURRENT;
   cec_config.bActivateSource       = 0;
-  cec_config.iButtonRepeatRateMs   = RepeatRateMs;
-  cec_config.iButtonReleaseDelayMs = ReleaseDelayMs;
-  cec_config.iDoubleTapTimeoutMs   = DoubleTapTimeoutMs;
+  cec_config.iButtonRepeatRateMs   = cecRepeatRateMs;
+  cec_config.iButtonReleaseDelayMs = cecReleaseDelayMs;
+  cec_config.iDoubleTapTimeoutMs   = cecDoubleTapTimeoutMs;
   cec_callbacks.keyPress           = &cecKeyPressCB;
   cec_config.callbacks             = &cec_callbacks;
   cec_config.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_RECORDING_DEVICE);
 
-  CEC::ICECAdapter* cec_adapter = LibCecInitialise(&cec_config);
+  cec_adapter = LibCecInitialise(&cec_config);
   if(!cec_adapter)
   {
     std::cerr << "Cannot load libcec.so" << std::endl;
@@ -164,7 +174,7 @@ int main(int argc, char* argv[])
   if (cec_device_name.empty())
   {
 
-    std::cout << "No cec device port provided, attempting autodetect..."
+    std::cout << "Attempting cec device autodetect..."
               << std::endl;
     std::array<CEC::cec_adapter_descriptor,10> cec_devices;
     int8_t devices_found =
@@ -272,17 +282,17 @@ void read_config_yaml(std::string config_file)
 
   if (config["RepeatRateMs"])
   {
-    RepeatRateMs = config["RepeatRateMs"].as<int>();
+    cecRepeatRateMs = config["RepeatRateMs"].as<int>();
   }
 
   if (config["ReleaseDelayMs"])
   {
-    ReleaseDelayMs = config["ReleaseDelayMs"].as<int>();
+    cecReleaseDelayMs = config["ReleaseDelayMs"].as<int>();
   }
 
   if (config["DoubleTapTimeoutMs"])
   {
-    DoubleTapTimeoutMs = config["DoubleTapTimeoutMs"].as<int>();
+    cecDoubleTapTimeoutMs = config["DoubleTapTimeoutMs"].as<int>();
   }
 
   if (config["keymap"])
@@ -335,6 +345,139 @@ void cecKeyPressCB(void*, const CEC::cec_keypress* msg)
 }
 
 
+bool execCECCommand(std::string cmd, std::string args, std::string* response)
+{
+  if (cmd.compare("transmit") == 0)
+  {
+    CEC::cec_command bytes = cec_adapter->CommandFromString(args.c_str());
+    bytes.transmit_timeout = 0;
+    if (cec_adapter->Transmit(bytes))
+    {
+      *response = "Bytes sent (Warning: This function has not been tested)";
+    }
+    else
+    {
+      *response = "Byte transmission failed";
+    }
+  }
+  else if (cmd.compare("on") == 0)
+  {
+    int addr = -1;
+    if (sscanf(args.c_str(), "%x", &addr) == 1)
+    {
+      if ((addr >= 0) && (addr < 256))
+      {
+        if(cec_adapter->PowerOnDevices((CEC::cec_logical_address) addr))
+        {
+          *response = "Device powered on";
+          return true;
+        }
+      }
+    }
+
+    *response = "Failed to power device";
+    return false;
+  }
+  else if (cmd.compare("standby") == 0)
+  {
+    int addr = -1;
+    if (sscanf(args.c_str(), "%x", &addr) == 1)
+    {
+      if ((addr >= 0) && (addr < 256))
+      {
+        if(cec_adapter->StandbyDevices((CEC::cec_logical_address) addr))
+        {
+          *response = "Device set to standby";
+          return true;
+        }
+      }
+    }
+
+    *response = "Failed to put device in standby";
+    return false;
+  }
+  else if (cmd.compare("set_addr_active") == 0)
+  {
+    int addr = -1;
+    if (sscanf(args.c_str(), "%x", &addr) == 1)
+    {
+      std::cout << "addr: " << addr << std::endl;
+      if ((addr >= 0) && (addr < CEC_INVALID_PHYSICAL_ADDRESS))
+      {
+        cec_adapter->SetStreamPath((uint16_t) addr);
+        *response = "Active path set";
+        return true;
+      }
+    }
+
+    *response = "Failed to set active path";
+    return false;
+  }
+  else if (cmd.compare("activate") == 0)
+  {
+    if (cec_adapter->SetActiveSource())
+    {
+      *response = "Device set as active source";
+    }
+    else
+    {
+      *response = "Failed to set device as active source";
+    }
+  }
+  else if (cmd.compare("deactivate") == 0)
+  {
+    if (cec_adapter->SetInactiveView())
+    {
+      *response = "Device set as inactive";
+    }
+    else
+    {
+      *response = "Failed to set device inactive view";
+    }
+  }
+  else if (cmd.compare("volup") == 0)
+  {
+    if (cec_adapter->VolumeUp())
+    {
+      *response = "Volume increased";
+    }
+    else
+    {
+      *response = "Failed change volume";
+    }
+  }
+  else if (cmd.compare("voldown") == 0)
+  {
+    if (cec_adapter->VolumeDown())
+    {
+      *response = "Volume decreased";
+    }
+    else
+    {
+      *response = "Failed change volume";
+    }
+  }
+  else if (cmd.compare("mute") == 0)
+  {
+    if (cec_adapter->AudioToggleMute())
+    {
+      *response = "Mute toggled";
+    }
+    else
+    {
+      *response = "Failed to toggle mute";
+    }
+  }
+  else
+  {
+    *response = "The CEC command given was invalid";
+    return false;
+  }
+
+  return true;
+}
+
+
 void wsMessageCB(websocketpp::server<websocketpp::config::asio>* serv,
                  websocketpp::connection_hdl hdl,
                  websocketpp::server<websocketpp::config::asio>::message_ptr msg)
@@ -349,21 +492,16 @@ void wsMessageCB(websocketpp::server<websocketpp::config::asio>* serv,
   {
     std::string target = recievedJson.get("target", "").asString();
     std::string command = recievedJson.get("command", "").asString();
+    std::string arguments = recievedJson.get("args", "").asString();
     if (!(target.empty() || command.empty()))
     {
       if (target.compare("cec") == 0)
       {
-        CEC::cec_user_control_code cCode;
-        if (getCECControlCode(command, &cCode))
-        {
-          responseJson["success"] = true;
-          responseJson["message"] = "cec code received";
-        }
-        else
-        {
-          responseJson["success"] = false;
-          responseJson["message"] = "Unrecognised cec command";
-        }
+        std::string exec_response;
+        responseJson["success"] = execCECCommand(command, arguments,
+                                                 &exec_response);
+        responseJson["message"] = exec_response;
+
       }
       else if (target.compare("key") == 0)
       {
@@ -420,11 +558,12 @@ void print_usage(std::string prog_name)
 {
     std::cout << std::endl << "usage: " << prog_name << " [options]"
       << std::endl << std::endl << "options:"
-      << std::endl << "\t-c {file}\t- configuration yaml location"
-      << std::endl << "\t-d {device}\t- cec device port (default: autodetect)"
-      << std::endl << "\t-u {device}\t- uinput device port (default: /dev/uinput)"
-      << std::endl << "\t-p {port}\t- uinput device port (default: websocket disabled)"
-      << std::endl << "\t-m\t\t- dump config yaml and exit"
+      << std::endl << "\t-c {file}   - configuration yaml location"
+      << std::endl << "\t-d {device} - cec device port (default: autodetect)"
+      << std::endl << "\t-u {device} - uinput device port (default: /dev/uinput)"
+      << std::endl << "\t-p {port}   - websocket server port (default: websocket disabled)"
+      << std::endl << "\t-m          - dump config yaml and exit"
+      << std::endl << "\t-n {name}   - CEC device name, max length=13 {default: cec_keyboard}"
       << std::endl << std::endl;
 }
 
